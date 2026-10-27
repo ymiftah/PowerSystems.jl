@@ -196,6 +196,46 @@ end
     end
 end
 
+@testset "get_services_bid applies scaling against the device" begin
+    initial_time = Dates.DateTime("2020-01-01")
+    resolution = Dates.Hour(1)
+    power_units = UnitSystem.NATURAL_UNITS
+    data_pwl = SortedDict(initial_time => test_costs[PiecewiseStepData])
+    sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys")
+    generator = get_component(ThermalStandard, sys, "322_CT_6")
+    market_bid = MarketBidCost(nothing)
+    set_operation_cost!(generator, market_bid)
+    forecast_fd = Deterministic(
+        "variable_cost",
+        Dict(k => get_function_data.(v) for (k, v) in pairs(data_pwl)),
+        resolution,
+    )
+    set_variable_cost!(sys, generator, forecast_fd, power_units)
+
+    service = first(generator.services)
+    scaled_fd = Deterministic(
+        get_name(service),
+        Dict(k => get_function_data.(v) for (k, v) in pairs(data_pwl)),
+        resolution;
+        scaling_factor_multiplier = get_max_active_power,
+    )
+    set_service_bid!(sys, generator, service, scaled_fd, power_units)
+
+    fd = get_max_active_power(generator)
+    expected = PSY._make_market_bid_curve(
+        PiecewiseStepData(
+            IS.get_x_coords(get_function_data(first(data_pwl[initial_time]))),
+            IS.get_y_coords(get_function_data(first(data_pwl[initial_time]))) .* fd,
+        ),
+    )
+    service_cost =
+        get_services_bid(generator, market_bid, service; start_time = initial_time)
+    @test isapprox(
+        IS.get_y_coords(get_function_data(first(TimeSeries.values(service_cost)))),
+        IS.get_y_coords(get_function_data(expected)),
+    )
+end
+
 @testset "Test MarketBidCost with PiecewiseLinearData Cost Timeseries, initial_input, and no_load_cost" begin
     initial_time = Dates.DateTime("2020-01-01")
     resolution = Dates.Hour(1)
