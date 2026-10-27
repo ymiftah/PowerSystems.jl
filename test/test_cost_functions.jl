@@ -236,6 +236,87 @@ end
     )
 end
 
+@testset "Test MarketBidCost decremental service bids" begin
+    initial_time = Dates.DateTime("2020-01-01")
+    resolution = Dates.Hour(1)
+    power_units = UnitSystem.NATURAL_UNITS
+    horizon = 24
+    data_pwl = SortedDict(initial_time => test_costs[PiecewiseStepData])
+    sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys")
+    generator = get_component(ThermalStandard, sys, "322_CT_6")
+    market_bid = MarketBidCost(nothing)
+    set_operation_cost!(generator, market_bid)
+    energy_fd = Deterministic(
+        "variable_cost",
+        Dict(k => get_function_data.(v) for (k, v) in pairs(data_pwl)),
+        resolution,
+    )
+    set_incremental_variable_cost!(sys, generator, energy_fd, power_units)
+    decremental_energy_fd = Deterministic(
+        "decremental_variable_cost",
+        Dict(k => get_function_data.(v) for (k, v) in pairs(data_pwl)),
+        resolution,
+    )
+    set_decremental_variable_cost!(sys, generator, decremental_energy_fd, power_units)
+
+    service = first(generator.services)
+    service_name = get_name(service)
+    inc_psd = PiecewiseStepData([0.0, 10.0, 20.0], [650.3, 700.0])
+    dec_psd = PiecewiseStepData([0.0, 5.0, 15.0], [120.0, 180.0])
+    inc_data = Deterministic(
+        service_name,
+        Dict(initial_time => fill(inc_psd, horizon)),
+        resolution,
+    )
+    dec_data = Deterministic(
+        get_decremental_service_bid_name(service),
+        Dict(initial_time => fill(dec_psd, horizon)),
+        resolution,
+    )
+    set_service_bid!(sys, generator, service, inc_data, power_units)
+    set_decremental_service_bid!(sys, generator, service, dec_data, power_units)
+
+    @test get_decremental_service_bid_name(service) == string(service_name, "_decremental")
+
+    dec_cost = get_decremental_services_bid(
+        generator,
+        market_bid,
+        service;
+        start_time = initial_time,
+    )
+    dec_curve = get_function_data(first(TimeSeries.values(dec_cost)))
+    @test IS.get_y_coords(dec_curve) == IS.get_y_coords(dec_psd)
+    @test IS.get_x_coords(dec_curve) == IS.get_x_coords(dec_psd)
+
+    inc_cost = get_services_bid(generator, market_bid, service; start_time = initial_time)
+    inc_curve = get_function_data(first(TimeSeries.values(inc_cost)))
+    @test IS.get_y_coords(inc_curve) == IS.get_y_coords(inc_psd)
+    @test IS.get_x_coords(inc_curve) == IS.get_x_coords(inc_psd)
+    @test IS.get_y_coords(inc_curve) != IS.get_y_coords(dec_curve)
+
+    offers = get_ancillary_service_offers(market_bid)
+    @test count(==(service), offers) == 1
+
+    wrong_name = Deterministic(
+        service_name,
+        Dict(initial_time => fill(dec_psd, horizon)),
+        resolution,
+    )
+    @test_throws ErrorException set_decremental_service_bid!(
+        sys, generator, service, wrong_name, power_units)
+
+    quadratic = Deterministic(
+        get_decremental_service_bid_name(service),
+        Dict(initial_time => fill(QuadraticFunctionData(1.0, 2.0, 3.0), horizon)),
+        resolution,
+    )
+    @test_throws TypeError set_decremental_service_bid!(
+        sys, generator, service, quadratic, power_units)
+
+    @test_throws ArgumentError set_decremental_service_bid!(
+        sys, generator, service, dec_data, UnitSystem.SYSTEM_BASE)
+end
+
 @testset "Test MarketBidCost with PiecewiseLinearData Cost Timeseries, initial_input, and no_load_cost" begin
     initial_time = Dates.DateTime("2020-01-01")
     resolution = Dates.Hour(1)

@@ -355,6 +355,44 @@ function get_services_bid(
 end
 
 """
+Return the name of the time series that holds the decremental service bid for `service`,
+which is the service name with the suffix `"_decremental"`.
+
+# Arguments
+- `service::`[`Service`](@ref): Service for which the decremental bid is stored
+
+# Returns
+- `String`: The decremental service bid time series name
+"""
+get_decremental_service_bid_name(service::Service) =
+    string(get_name(service), "_decremental")
+
+"""
+Return decremental service bid time series data for a [`StaticInjection`](@ref) device with a
+[`MarketBidCost`](@ref). The user may specify `start_time` and `len` and the function returns
+a `TimeArray` of [`CostCurve`](@ref)s.
+"""
+function get_decremental_services_bid(
+    device::StaticInjection,
+    cost::MarketBidCost,
+    service::Service;
+    start_time::Union{Nothing, Dates.DateTime} = nothing,
+    len::Union{Nothing, Int} = nothing,
+)
+    variable_ts_key = get_decremental_offer_curves(cost)
+    ts = get_time_series(
+        variable_ts_key.time_series_type,
+        device,
+        get_decremental_service_bid_name(service);
+        start_time = start_time,
+        len = len,
+        count = 1,
+    )
+    converted = read_and_convert_ts(ts, device, start_time, len, _make_market_bid_curve)
+    return converted
+end
+
+"""
 Get the fuel cost of a [`HybridSystem`](@ref)'s thermal subunit.
 
 [`HybridSystem`](@ref) is a [`StaticInjectionSubsystem`](@ref) that aggregates subunits; fuel cost
@@ -978,5 +1016,51 @@ function set_service_bid!(
     add_time_series!(sys, component, time_series_data)
     ancillary_service_offers = get_ancillary_service_offers(get_operation_cost(component))
     push!(ancillary_service_offers, service)
+    return
+end
+
+"""
+Adds decremental service bids time-series data to the [`MarketBidCost`](@ref). The time series
+name must be given by [`get_decremental_service_bid_name`](@ref).
+
+# Arguments
+- `sys::`[`System`](@ref): PowerSystem System
+- `component::`[`StaticInjection`](@ref): Static injection device
+- `service::`[`Service`](@ref): Service for which the device is eligible to contribute
+- `time_series_data::IS.TimeSeriesData`: TimeSeriesData
+- `power_units::`[`UnitSystem`](@ref): Units to be used for data, must be `NATURAL_UNITS`
+"""
+function set_decremental_service_bid!(
+    sys::System,
+    component::StaticInjection,
+    service::Service,
+    time_series_data::IS.TimeSeriesData,
+    power_units::UnitSystem,
+)
+    data_type = IS.eltype_data(time_series_data)
+    !(data_type <: PiecewiseStepData) &&
+        throw(TypeError(set_decremental_service_bid!, PiecewiseStepData, data_type))
+    _validate_market_bid_cost(
+        get_operation_cost(component),
+        "get_operation_cost(component)",
+    )
+    if get_name(time_series_data) != get_decremental_service_bid_name(service)
+        error(
+            "Name provided in the TimeSeries Data $(get_name(time_series_data)), doesn't match the decremental Service bid name $(get_decremental_service_bid_name(service)).",
+        )
+    end
+    if power_units != UnitSystem.NATURAL_UNITS
+        throw(
+            ArgumentError(
+                "Power Unit specified for service market bids must be NATURAL_UNITS",
+            ),
+        )
+    end
+    verify_device_eligibility(sys, component, service)
+    add_time_series!(sys, component, time_series_data)
+    ancillary_service_offers = get_ancillary_service_offers(get_operation_cost(component))
+    if !any(==(service), ancillary_service_offers)
+        push!(ancillary_service_offers, service)
+    end
     return
 end

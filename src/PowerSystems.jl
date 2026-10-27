@@ -528,11 +528,12 @@ export get_export_offer_curves, set_export_offer_curves!
 export get_import_variable_cost, get_export_variable_cost
 export get_energy_import_weekly_limit, set_energy_import_weekly_limit!
 export get_energy_export_weekly_limit, set_energy_export_weekly_limit!
-export get_services_bid
+export get_services_bid, get_decremental_services_bid
+export get_decremental_service_bid_name
 export set_variable_cost!
 export set_incremental_variable_cost!, set_decremental_variable_cost!
 export set_import_variable_cost!, set_export_variable_cost!
-export set_service_bid!
+export set_service_bid!, set_decremental_service_bid!
 export iterate_windows
 export get_window
 export transform_single_time_series!
