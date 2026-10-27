@@ -160,3 +160,24 @@ time_series_data = Deterministic(;
 )
 set_service_bid!(sys, generator, service, time_series_data, UnitSystem.NATURAL_UNITS)
 ```
+
+A decremental service bid, which prices providing the service from the consumption side (for
+example a storage device reducing its charging), uses `set_decremental_service_bid!`. Its time
+series name is reserved as `"<service name>_decremental"`, given by
+`get_decremental_service_bid_name`. The service is listed once in `ancillary_service_offers`
+whether it has an incremental bid, a decremental bid, or both.
+
+```julia
+time_series_dec = Deterministic(;
+    name = get_decremental_service_bid_name(service),
+    data = data,
+    resolution = Dates.Hour(1),
+)
+set_decremental_service_bid!(
+    sys,
+    generator,
+    service,
+    time_series_dec,
+    UnitSystem.NATURAL_UNITS,
+)
+```

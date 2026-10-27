@@ -212,7 +212,7 @@ end
     )
     set_variable_cost!(sys, generator, forecast_fd, power_units)
 
-    service = first(generator.services)
+    service = first(get_services(generator))
     scaled_fd = Deterministic(
         get_name(service),
         Dict(k => get_function_data.(v) for (k, v) in pairs(data_pwl)),
@@ -221,11 +221,11 @@ end
     )
     set_service_bid!(sys, generator, service, scaled_fd, power_units)
 
-    fd = get_max_active_power(generator)
+    max_p = get_max_active_power(generator)
     expected = PSY._make_market_bid_curve(
         PiecewiseStepData(
             IS.get_x_coords(get_function_data(first(data_pwl[initial_time]))),
-            IS.get_y_coords(get_function_data(first(data_pwl[initial_time]))) .* fd,
+            IS.get_y_coords(get_function_data(first(data_pwl[initial_time]))) .* max_p,
         ),
     )
     service_cost =
@@ -234,6 +234,8 @@ end
         IS.get_y_coords(get_function_data(first(TimeSeries.values(service_cost)))),
         IS.get_y_coords(get_function_data(expected)),
     )
+    @test IS.get_x_coords(get_function_data(first(TimeSeries.values(service_cost)))) ==
+          IS.get_x_coords(get_function_data(expected))
 end
 
 @testset "Test MarketBidCost decremental service bids" begin
@@ -315,6 +317,182 @@ end
 
     @test_throws ArgumentError set_decremental_service_bid!(
         sys, generator, service, dec_data, UnitSystem.SYSTEM_BASE)
+end
+
+@testset "Decremental service bids: lookup, eligibility and units" begin
+    initial_time = Dates.DateTime("2020-01-01")
+    resolution = Dates.Hour(1)
+    horizon = 24
+    power_units = UnitSystem.NATURAL_UNITS
+    inc_psd = PiecewiseStepData([0.0, 10.0, 20.0], [650.3, 700.0])
+    dec_psd = PiecewiseStepData([0.0, 5.0, 15.0], [120.0, 180.0])
+    energy_fd = Dict(
+        initial_time => get_function_data.(test_costs[PiecewiseStepData]),
+    )
+    dates = collect(initial_time:resolution:(initial_time + resolution * (horizon - 1)))
+    dec_name(service) = get_decremental_service_bid_name(service)
+    dec_bid(service, data = dec_psd) =
+        Deterministic(
+            dec_name(service),
+            Dict(initial_time => fill(data, horizon)),
+            resolution,
+        )
+    inc_bid(service, data = inc_psd) =
+        Deterministic(
+            get_name(service),
+            Dict(initial_time => fill(data, horizon)),
+            resolution,
+        )
+    y_coords(ts) = IS.get_y_coords(get_function_data(first(TimeSeries.values(ts))))
+    x_coords(ts) = IS.get_x_coords(get_function_data(first(TimeSeries.values(ts))))
+
+    function _setup(; incremental_energy = true, decremental_energy = true)
+        sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys")
+        generator = get_component(ThermalStandard, sys, "322_CT_6")
+        market_bid = MarketBidCost(nothing)
+        set_operation_cost!(generator, market_bid)
+        if incremental_energy
+            set_incremental_variable_cost!(
+                sys,
+                generator,
+                Deterministic("variable_cost", energy_fd, resolution),
+                power_units,
+            )
+        end
+        if decremental_energy
+            set_decremental_variable_cost!(
+                sys,
+                generator,
+                Deterministic("decremental_variable_cost", energy_fd, resolution),
+                power_units,
+            )
+        end
+        return sys, generator, market_bid, first(get_services(generator))
+    end
+
+    @testset "Decremental bid reads with unset decremental energy curves" begin
+        sys, generator, market_bid, service = _setup(; decremental_energy = false)
+        @test isnothing(get_decremental_offer_curves(market_bid))
+        set_decremental_service_bid!(sys, generator, service, dec_bid(service), power_units)
+        dec_cost = get_decremental_services_bid(
+            generator, market_bid, service; start_time = initial_time)
+        @test IS.get_y_coords(get_function_data(first(TimeSeries.values(dec_cost)))) ==
+              IS.get_y_coords(dec_psd)
+        @test IS.get_x_coords(get_function_data(first(TimeSeries.values(dec_cost)))) ==
+              IS.get_x_coords(dec_psd)
+    end
+
+    @testset "Incremental bid reads with unset incremental energy curves" begin
+        sys, generator, market_bid, service = _setup(; incremental_energy = false)
+        @test isnothing(get_incremental_offer_curves(market_bid))
+        set_service_bid!(sys, generator, service, inc_bid(service), power_units)
+        inc_cost =
+            get_services_bid(generator, market_bid, service; start_time = initial_time)
+        @test IS.get_y_coords(get_function_data(first(TimeSeries.values(inc_cost)))) ==
+              IS.get_y_coords(inc_psd)
+    end
+
+    @testset "Incremental bid reads with a different series type than the energy curves" begin
+        sys, generator, market_bid, service = _setup()
+        sts = IS.SingleTimeSeries(;
+            name = get_name(service),
+            data = TimeSeries.TimeArray(dates, fill(inc_psd, horizon)),
+        )
+        set_service_bid!(sys, generator, service, sts, power_units)
+        inc_cost =
+            get_services_bid(generator, market_bid, service; start_time = initial_time)
+        @test IS.get_y_coords(get_function_data(first(TimeSeries.values(inc_cost)))) ==
+              IS.get_y_coords(inc_psd)
+    end
+
+    @testset "Decremental set before incremental keeps one offer entry" begin
+        sys, generator, market_bid, service = _setup()
+        set_decremental_service_bid!(sys, generator, service, dec_bid(service), power_units)
+        set_service_bid!(sys, generator, service, inc_bid(service), power_units)
+        @test count(==(service), get_ancillary_service_offers(market_bid)) == 1
+        @test y_coords(
+            get_services_bid(generator, market_bid, service; start_time = initial_time),
+        ) ==
+              IS.get_y_coords(inc_psd)
+        @test y_coords(
+            get_decremental_services_bid(
+                generator,
+                market_bid,
+                service;
+                start_time = initial_time,
+            ),
+        ) == IS.get_y_coords(dec_psd)
+    end
+
+    @testset "Decremental bid applies scaling against the device" begin
+        sys, generator, market_bid, service = _setup()
+        max_p = get_max_active_power(generator)
+        scaled = Deterministic(
+            dec_name(service),
+            Dict(initial_time => fill(dec_psd, horizon)),
+            resolution;
+            scaling_factor_multiplier = get_max_active_power,
+        )
+        set_decremental_service_bid!(sys, generator, service, scaled, power_units)
+        dec_cost = get_decremental_services_bid(
+            generator, market_bid, service; start_time = initial_time)
+        @test isapprox(y_coords(dec_cost), IS.get_y_coords(dec_psd) .* max_p)
+        @test x_coords(dec_cost) == IS.get_x_coords(dec_psd)
+    end
+
+    @testset "Decremental getter with and without start_time and len" begin
+        sys, generator, market_bid, service = _setup()
+        set_decremental_service_bid!(sys, generator, service, dec_bid(service), power_units)
+        @test length(
+            TimeSeries.values(get_decremental_services_bid(generator, market_bid, service)),
+        ) == horizon
+        one_step = get_decremental_services_bid(
+            generator, market_bid, service; start_time = initial_time, len = 1)
+        @test length(TimeSeries.values(one_step)) == 1
+        @test y_coords(one_step) == IS.get_y_coords(dec_psd)
+    end
+
+    @testset "Decremental bid requires an eligible service and a MarketBidCost" begin
+        sys, generator, market_bid, _ = _setup()
+        unused = ConstantReserve{ReserveDown}(;
+            name = "unused_reserve",
+            available = true,
+            time_frame = 0.0,
+            requirement = 0.0,
+            sustained_time = 0.0,
+            max_output_fraction = 1.0,
+            max_participation_factor = 1.0,
+            deployed_fraction = 0.0,
+            ext = Dict{String, Any}(),
+        )
+        @test_throws ErrorException set_decremental_service_bid!(
+            sys, generator, unused, dec_bid(unused), power_units)
+        @test_throws ArgumentError get_decremental_services_bid(
+            generator, market_bid, unused; start_time = initial_time)
+
+        plain = first(
+            c for c in get_components(ThermalStandard, sys)
+            if !(get_operation_cost(c) isa MarketBidCost)
+        )
+        service = first(get_services(plain))
+        @test_throws TypeError set_decremental_service_bid!(
+            sys, plain, service, dec_bid(service), power_units)
+    end
+
+    @testset "Ambiguous decremental series name is rejected" begin
+        sys, generator, market_bid, service = _setup()
+        set_decremental_service_bid!(sys, generator, service, dec_bid(service), power_units)
+        add_time_series!(
+            sys,
+            generator,
+            IS.SingleTimeSeries(;
+                name = dec_name(service),
+                data = TimeSeries.TimeArray(dates, fill(dec_psd, horizon)),
+            ),
+        )
+        @test_throws ArgumentError get_decremental_services_bid(
+            generator, market_bid, service; start_time = initial_time)
+    end
 end
 
 @testset "Test MarketBidCost with PiecewiseLinearData Cost Timeseries, initial_input, and no_load_cost" begin

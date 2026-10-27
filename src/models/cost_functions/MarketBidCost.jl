@@ -37,7 +37,7 @@ mutable struct MarketBidCost <: OfferCurveCost
     incremental_initial_input::Union{Nothing, TimeSeriesKey}
     "If using a time series for decremental_offer_curves, this is a time series of `Float64` representing the `initial_input`"
     decremental_initial_input::Union{Nothing, TimeSeriesKey}
-    "Bids for the ancillary services"
+    "Services for which this cost has an incremental bid, a decremental bid, or both. The incremental bid series is named after the service and the decremental bid series is named `\"<service name>_decremental\"`."
     ancillary_service_offers::Vector{Service}
 end
 

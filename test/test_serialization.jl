@@ -127,6 +127,73 @@ end
     @test result
 end
 
+@testset "Test JSON serialization of MarketBidCost with decremental service bids" begin
+    sys = System(100.0)
+    bus = ACBus(nothing)
+    bus.name = "bus1"
+    bus.number = 1
+    bus.bustype = ACBusTypes.REF
+    add_component!(sys, bus)
+    gen = ThermalStandard(nothing)
+    gen.bus = bus
+    gen.name = "gen_dec"
+    add_component!(sys, gen)
+    initial_time = Dates.DateTime("2020-01-01T00:00:00")
+    dates = collect(initial_time:Dates.Hour(1):Dates.DateTime("2020-01-01T23:00:00"))
+    data = PiecewiseStepData.(
+        [[i, i + 1, i + 2] for i in 1.0:24.0],
+        [[i, i + 1] for i in 1.0:24.0],
+    )
+    market_bid = MarketBidCost(nothing)
+    set_operation_cost!(gen, market_bid)
+    power_units = UnitSystem.NATURAL_UNITS
+    ta = TimeSeries.TimeArray(dates, data)
+    set_incremental_variable_cost!(
+        sys,
+        gen,
+        IS.SingleTimeSeries(; name = "variable_cost", data = ta),
+        power_units,
+    )
+    set_decremental_variable_cost!(
+        sys,
+        gen,
+        IS.SingleTimeSeries(; name = "decremental_variable_cost", data = ta),
+        power_units,
+    )
+    service = ConstantReserve{ReserveDown}(;
+        name = "dec_reserve",
+        available = false,
+        time_frame = 0.0,
+        requirement = 0.0,
+        sustained_time = 0.0,
+        max_output_fraction = 1.0,
+        max_participation_factor = 1.0,
+        deployed_fraction = 0.0,
+        ext = Dict{String, Any}(),
+    )
+    add_component!(sys, service)
+    add_service!(gen, service, sys)
+    set_decremental_service_bid!(
+        sys,
+        gen,
+        service,
+        IS.SingleTimeSeries(; name = get_decremental_service_bid_name(service), data = ta),
+        power_units,
+    )
+    sys2, result = validate_serialization(sys)
+    @test result
+    gen2 = get_component(ThermalStandard, sys2, "gen_dec")
+    service2 = first(get_services(gen2))
+    dec_cost = get_decremental_services_bid(
+        gen2,
+        get_operation_cost(gen2),
+        service2;
+        start_time = initial_time,
+    )
+    @test IS.get_y_coords(get_function_data(first(TimeSeries.values(dec_cost)))) ==
+          IS.get_y_coords(first(data))
+end
+
 @testset "Test JSON serialization of ReserveDemandCurve" begin
     sys = System(100.0)
     devices = []
