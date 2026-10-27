@@ -340,26 +340,42 @@ function _add_ancillary_service_offer!(cost::MarketBidCost, service::Service)
 end
 
 """
-Read the service bid time series named `name` from `device`. The name must match exactly one
-time series on the device.
+Read the service bid time series named `name` from `device`. When `time_series_type` is given,
+only series whose type is a subtype of it are considered. Otherwise, if several series share the
+name and exactly one is a `IS.StaticTimeSeriesKey` series, that series is used, because a
+transformed forecast is a view of it. Any remaining ambiguity is an error.
 """
 function _read_service_bid(
     device::StaticInjection,
     name::AbstractString;
     start_time::Union{Nothing, Dates.DateTime},
     len::Union{Nothing, Int},
+    time_series_type::Union{Nothing, Type{<:IS.TimeSeriesData}},
 )
     keys = filter(k -> IS.get_name(k) == name, IS.get_time_series_keys(device))
+    if !isnothing(time_series_type)
+        keys = filter(k -> IS.get_time_series_type(k) <: time_series_type, keys)
+    elseif length(keys) > 1
+        static_keys = filter(k -> k isa IS.StaticTimeSeriesKey, keys)
+        length(static_keys) == 1 && (keys = static_keys)
+    end
     if isempty(keys)
         throw(
             ArgumentError(
-                "No service bid named $(repr(name)) on device $(get_name(device))",
+                "No service bid named $(repr(name)) on device $(get_name(device))" *
+                (
+                    if isnothing(time_series_type)
+                        ""
+                    else
+                        " with time series type $(time_series_type)"
+                    end
+                ),
             ),
         )
     elseif length(keys) > 1
         throw(
             ArgumentError(
-                "Several time series named $(repr(name)) on device $(get_name(device)) differ in time series type, resolution or features; remove the extra ones to disambiguate",
+                "Several time series named $(repr(name)) on device $(get_name(device)) differ in resolution or features; pass `time_series_type` to choose one, or remove the extra ones",
             ),
         )
     end
@@ -378,6 +394,10 @@ series type is independent of the energy offer curves.
 - `service::`[`Service`](@ref): Service whose incremental bid is returned
 - `start_time`: Optional start time of the lookup
 - `len`: Optional number of time steps to return
+- `time_series_type`: Optional subtype of `IS.TimeSeriesData` to read, for example
+  `DeterministicSingleTimeSeries` to read the forecast windows of a transformed bid instead of
+  the stored `SingleTimeSeries`. Without it, a stored static series is preferred over forecast
+  views of the same name.
 
 # Returns
 - `TimeArray`: The service bid as [`CostCurve`](@ref)s, one per time step
@@ -388,8 +408,15 @@ function get_services_bid(
     service::Service;
     start_time::Union{Nothing, Dates.DateTime} = nothing,
     len::Union{Nothing, Int} = nothing,
+    time_series_type::Union{Nothing, Type{<:IS.TimeSeriesData}} = nothing,
 )
-    return _read_service_bid(device, get_name(service); start_time = start_time, len = len)
+    return _read_service_bid(
+        device,
+        get_name(service);
+        start_time = start_time,
+        len = len,
+        time_series_type = time_series_type,
+    )
 end
 
 """
@@ -418,6 +445,10 @@ offer curves.
 - `service::`[`Service`](@ref): Service whose decremental bid is returned
 - `start_time`: Optional start time of the lookup
 - `len`: Optional number of time steps to return
+- `time_series_type`: Optional subtype of `IS.TimeSeriesData` to read, for example
+  `DeterministicSingleTimeSeries` to read the forecast windows of a transformed bid instead of
+  the stored `SingleTimeSeries`. Without it, a stored static series is preferred over forecast
+  views of the same name.
 
 # Returns
 - `TimeArray`: The service bid as [`CostCurve`](@ref)s, one per time step
@@ -428,12 +459,14 @@ function get_decremental_services_bid(
     service::Service;
     start_time::Union{Nothing, Dates.DateTime} = nothing,
     len::Union{Nothing, Int} = nothing,
+    time_series_type::Union{Nothing, Type{<:IS.TimeSeriesData}} = nothing,
 )
     return _read_service_bid(
         device,
         get_decremental_service_bid_name(service);
         start_time = start_time,
         len = len,
+        time_series_type = time_series_type,
     )
 end
 

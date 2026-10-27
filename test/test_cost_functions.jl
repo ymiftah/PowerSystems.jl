@@ -319,6 +319,106 @@ end
         sys, generator, service, dec_data, UnitSystem.SYSTEM_BASE)
 end
 
+@testset "Service bids survive transform_single_time_series!" begin
+    initial_time = Dates.DateTime("2020-01-01T00:00:00")
+    power_units = UnitSystem.NATURAL_UNITS
+    n = 48
+    data =
+        PiecewiseStepData.([[i, i + 1, i + 2] for i in 1.0:n], [[i, i + 1] for i in 1.0:n])
+    dates = collect(initial_time:Dates.Hour(1):(initial_time + Dates.Hour(n - 1)))
+    ta = TimeSeries.TimeArray(dates, data)
+    function _bid_system()
+        sys = System(100.0)
+        bus = ACBus(nothing)
+        bus.name = "bus1"
+        bus.number = 1
+        bus.bustype = ACBusTypes.REF
+        add_component!(sys, bus)
+        gen = ThermalStandard(nothing)
+        gen.bus = bus
+        gen.name = "gen_ts"
+        add_component!(sys, gen)
+        market_bid = MarketBidCost(nothing)
+        set_operation_cost!(gen, market_bid)
+        service = ConstantReserve{ReserveDown}(;
+            name = "svc_ts",
+            available = true,
+            time_frame = 0.0,
+            requirement = 0.0,
+            sustained_time = 0.0,
+            max_output_fraction = 1.0,
+            max_participation_factor = 1.0,
+            deployed_fraction = 0.0,
+            ext = Dict{String, Any}(),
+        )
+        add_component!(sys, service)
+        add_service!(gen, service, sys)
+        return sys, gen, market_bid, service
+    end
+    y(ts) = IS.get_y_coords(get_function_data(first(TimeSeries.values(ts))))
+
+    sys, gen, market_bid, service = _bid_system()
+    set_service_bid!(
+        sys,
+        gen,
+        service,
+        IS.SingleTimeSeries(; name = get_name(service), data = ta),
+        power_units,
+    )
+    set_decremental_service_bid!(
+        sys,
+        gen,
+        service,
+        IS.SingleTimeSeries(; name = get_decremental_service_bid_name(service), data = ta),
+        power_units,
+    )
+    transform_single_time_series!(sys, Dates.Hour(24), Dates.Hour(1))
+    @test length(
+        get_time_series_keys(gen),
+    ) == 4
+
+    stored = IS.get_y_coords(first(data))
+    @test y(get_services_bid(gen, market_bid, service; start_time = initial_time)) == stored
+    @test y(
+        get_decremental_services_bid(gen, market_bid, service; start_time = initial_time),
+    ) == stored
+
+    window = get_services_bid(
+        gen,
+        market_bid,
+        service;
+        start_time = initial_time,
+        len = 24,
+        time_series_type = IS.DeterministicSingleTimeSeries,
+    )
+    @test length(TimeSeries.values(window)) == 24
+    @test all(
+        IS.get_y_coords(get_function_data(v)) == IS.get_y_coords(data[i])
+        for (i, v) in enumerate(TimeSeries.values(window))
+    )
+    dec_window = get_decremental_services_bid(
+        gen,
+        market_bid,
+        service;
+        start_time = initial_time,
+        len = 24,
+        time_series_type = IS.DeterministicSingleTimeSeries,
+    )
+    @test all(
+        IS.get_y_coords(get_function_data(v)) == IS.get_y_coords(data[i])
+        for (i, v) in enumerate(TimeSeries.values(dec_window))
+    )
+    @test y(
+        get_services_bid(
+            gen,
+            market_bid,
+            service;
+            start_time = initial_time,
+            time_series_type = IS.SingleTimeSeries,
+        ),
+    ) == stored
+end
+
 @testset "Decremental service bids: lookup, eligibility and units" begin
     initial_time = Dates.DateTime("2020-01-01")
     resolution = Dates.Hour(1)
@@ -481,13 +581,19 @@ end
 
     @testset "Ambiguous decremental series name is rejected" begin
         sys, generator, market_bid, service = _setup()
-        set_decremental_service_bid!(sys, generator, service, dec_bid(service), power_units)
+        name = dec_name(service)
         add_time_series!(
             sys,
             generator,
-            IS.SingleTimeSeries(;
-                name = dec_name(service),
-                data = TimeSeries.TimeArray(dates, fill(dec_psd, horizon)),
+            Deterministic(name, Dict(initial_time => fill(dec_psd, horizon)), resolution),
+        )
+        add_time_series!(
+            sys,
+            generator,
+            Deterministic(
+                name,
+                Dict(initial_time => fill(dec_psd, horizon ÷ 2)),
+                resolution * 2,
             ),
         )
         @test_throws ArgumentError get_decremental_services_bid(
