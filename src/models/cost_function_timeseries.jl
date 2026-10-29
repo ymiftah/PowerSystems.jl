@@ -330,9 +330,77 @@ get_variable_cost(
     _make_market_bid_curve, start_time, len)
 
 """
-Return service bid time series data for a [`StaticInjection`](@ref) device with a [`MarketBidCost`](@ref).
-The user may specify `start_time` and `len` and the function returns a `TimeArray` of
-[`CostCurve`](@ref)s.
+Add `service` to the `ancillary_service_offers` of `cost` unless it is already listed. A
+service is listed once whether it has an incremental bid, a decremental bid, or both.
+"""
+function _add_ancillary_service_offer!(cost::MarketBidCost, service::Service)
+    offers = get_ancillary_service_offers(cost)
+    any(==(service), offers) || push!(offers, service)
+    return
+end
+
+"""
+Read the service bid time series named `name` from `device`. When `time_series_type` is given,
+only series whose type is a subtype of it are considered. Otherwise, if several series share the
+name and exactly one is a `IS.StaticTimeSeriesKey` series, that series is used, because a
+transformed forecast is a view of it. Any remaining ambiguity is an error.
+"""
+function _read_service_bid(
+    device::StaticInjection,
+    name::AbstractString;
+    start_time::Union{Nothing, Dates.DateTime},
+    len::Union{Nothing, Int},
+    time_series_type::Union{Nothing, Type{<:IS.TimeSeriesData}},
+)
+    keys = filter(k -> IS.get_name(k) == name, IS.get_time_series_keys(device))
+    if !isnothing(time_series_type)
+        keys = filter(k -> IS.get_time_series_type(k) <: time_series_type, keys)
+    elseif length(keys) > 1
+        static_keys = filter(k -> k isa IS.StaticTimeSeriesKey, keys)
+        length(static_keys) == 1 && (keys = static_keys)
+    end
+    if isempty(keys)
+        throw(
+            ArgumentError(
+                "No service bid named $(repr(name)) on device $(get_name(device))" *
+                (
+                    if isnothing(time_series_type)
+                        ""
+                    else
+                        " with time series type $(time_series_type)"
+                    end
+                ),
+            ),
+        )
+    elseif length(keys) > 1
+        throw(
+            ArgumentError(
+                "Several time series named $(repr(name)) on device $(get_name(device)) differ in resolution or features; pass `time_series_type` to choose one, or remove the extra ones",
+            ),
+        )
+    end
+    ts = get_time_series(device, only(keys); start_time = start_time, len = len, count = 1)
+    return read_and_convert_ts(ts, device, start_time, len, _make_market_bid_curve)
+end
+
+"""
+Return the incremental service bid for `service` on a [`StaticInjection`](@ref) device with a
+[`MarketBidCost`](@ref). The bid is read from the time series named after the service, and its
+series type is independent of the energy offer curves.
+
+# Arguments
+- `device::`[`StaticInjection`](@ref): Device that holds the service bid time series
+- `cost::`[`MarketBidCost`](@ref): Operation cost of the device
+- `service::`[`Service`](@ref): Service whose incremental bid is returned
+- `start_time`: Optional start time of the lookup
+- `len`: Optional number of time steps to return
+- `time_series_type`: Optional subtype of `IS.TimeSeriesData` to read, for example
+  `DeterministicSingleTimeSeries` to read the forecast windows of a transformed bid instead of
+  the stored `SingleTimeSeries`. Without it, a stored static series is preferred over forecast
+  views of the same name.
+
+# Returns
+- `TimeArray`: The service bid as [`CostCurve`](@ref)s, one per time step
 """
 function get_services_bid(
     device::StaticInjection,
@@ -340,18 +408,66 @@ function get_services_bid(
     service::Service;
     start_time::Union{Nothing, Dates.DateTime} = nothing,
     len::Union{Nothing, Int} = nothing,
+    time_series_type::Union{Nothing, Type{<:IS.TimeSeriesData}} = nothing,
 )
-    variable_ts_key = get_incremental_offer_curves(cost)
-    ts = get_time_series(
-        variable_ts_key.time_series_type,
+    return _read_service_bid(
         device,
         get_name(service);
         start_time = start_time,
         len = len,
-        count = 1,
+        time_series_type = time_series_type,
     )
-    converted = read_and_convert_ts(ts, device, start_time, len, _make_market_bid_curve)
-    return converted
+end
+
+"""
+Return the name of the time series that holds the decremental service bid for `service`.
+The suffix `"_decremental"` is reserved for decremental service bids, so the name is
+`"<service name>_decremental"`.
+
+# Arguments
+- `service::`[`Service`](@ref): Service for which the decremental bid is stored
+
+# Returns
+- `String`: The decremental service bid time series name
+"""
+get_decremental_service_bid_name(service::Service) =
+    string(get_name(service), "_decremental")
+
+"""
+Return the decremental service bid for `service` on a [`StaticInjection`](@ref) device with a
+[`MarketBidCost`](@ref). The bid is read from the time series named by
+[`get_decremental_service_bid_name`](@ref), and its series type is independent of the energy
+offer curves.
+
+# Arguments
+- `device::`[`StaticInjection`](@ref): Device that holds the service bid time series
+- `cost::`[`MarketBidCost`](@ref): Operation cost of the device
+- `service::`[`Service`](@ref): Service whose decremental bid is returned
+- `start_time`: Optional start time of the lookup
+- `len`: Optional number of time steps to return
+- `time_series_type`: Optional subtype of `IS.TimeSeriesData` to read, for example
+  `DeterministicSingleTimeSeries` to read the forecast windows of a transformed bid instead of
+  the stored `SingleTimeSeries`. Without it, a stored static series is preferred over forecast
+  views of the same name.
+
+# Returns
+- `TimeArray`: The service bid as [`CostCurve`](@ref)s, one per time step
+"""
+function get_decremental_services_bid(
+    device::StaticInjection,
+    cost::MarketBidCost,
+    service::Service;
+    start_time::Union{Nothing, Dates.DateTime} = nothing,
+    len::Union{Nothing, Int} = nothing,
+    time_series_type::Union{Nothing, Type{<:IS.TimeSeriesData}} = nothing,
+)
+    return _read_service_bid(
+        device,
+        get_decremental_service_bid_name(service);
+        start_time = start_time,
+        len = len,
+        time_series_type = time_series_type,
+    )
 end
 
 """
@@ -940,13 +1056,18 @@ function set_shut_down!(
 end
 
 """
-Adds service bids time-series data to the [`MarketBidCost`](@ref).
+Add an incremental service bid time series to the [`MarketBidCost`](@ref) of a
+[`StaticInjection`](@ref) device. The time series name must equal the service name, the device
+must already be eligible for the service, and the data must be [`PiecewiseStepData`](@ref) in
+`NATURAL_UNITS`. The service is listed once in `ancillary_service_offers`, whether it has an
+incremental bid, a decremental bid, or both.
 
 # Arguments
 - `sys::`[`System`](@ref): PowerSystem System
 - `component::`[`StaticInjection`](@ref): Static injection device
 - `service::`[`Service`](@ref): Service for which the device is eligible to contribute
-- `time_series_data::IS.TimeSeriesData`: TimeSeriesData
+- `time_series_data::IS.TimeSeriesData`: TimeSeriesData of eltype [`PiecewiseStepData`](@ref)
+- `power_units::`[`UnitSystem`](@ref): Units of the data, must be `NATURAL_UNITS`
 """
 function set_service_bid!(
     sys::System,
@@ -976,7 +1097,54 @@ function set_service_bid!(
     end
     verify_device_eligibility(sys, component, service)
     add_time_series!(sys, component, time_series_data)
-    ancillary_service_offers = get_ancillary_service_offers(get_operation_cost(component))
-    push!(ancillary_service_offers, service)
+    _add_ancillary_service_offer!(get_operation_cost(component), service)
+    return
+end
+
+"""
+Add a decremental service bid time series to the [`MarketBidCost`](@ref) of a
+[`StaticInjection`](@ref) device. The bid prices providing the service from the consumption
+side, for example a storage device reducing its charging. The time series name must be
+[`get_decremental_service_bid_name`](@ref) of the service, which reserves the name
+`"<service name>_decremental"`. The device must already be eligible for the service, and the
+data must be [`PiecewiseStepData`](@ref) in `NATURAL_UNITS`. The service is listed once in
+`ancillary_service_offers`, whether it has an incremental bid, a decremental bid, or both.
+
+# Arguments
+- `sys::`[`System`](@ref): PowerSystem System
+- `component::`[`StaticInjection`](@ref): Static injection device
+- `service::`[`Service`](@ref): Service for which the device is eligible to contribute
+- `time_series_data::IS.TimeSeriesData`: TimeSeriesData of eltype [`PiecewiseStepData`](@ref)
+- `power_units::`[`UnitSystem`](@ref): Units of the data, must be `NATURAL_UNITS`
+"""
+function set_decremental_service_bid!(
+    sys::System,
+    component::StaticInjection,
+    service::Service,
+    time_series_data::IS.TimeSeriesData,
+    power_units::UnitSystem,
+)
+    data_type = IS.eltype_data(time_series_data)
+    !(data_type <: PiecewiseStepData) &&
+        throw(TypeError(set_decremental_service_bid!, PiecewiseStepData, data_type))
+    _validate_market_bid_cost(
+        get_operation_cost(component),
+        "get_operation_cost(component)",
+    )
+    if get_name(time_series_data) != get_decremental_service_bid_name(service)
+        error(
+            "Name provided in the TimeSeries Data $(get_name(time_series_data)), doesn't match the decremental Service bid name $(get_decremental_service_bid_name(service)).",
+        )
+    end
+    if power_units != UnitSystem.NATURAL_UNITS
+        throw(
+            ArgumentError(
+                "Power Unit specified for service market bids must be NATURAL_UNITS",
+            ),
+        )
+    end
+    verify_device_eligibility(sys, component, service)
+    add_time_series!(sys, component, time_series_data)
+    _add_ancillary_service_offer!(get_operation_cost(component), service)
     return
 end
