@@ -194,6 +194,44 @@ end
           IS.get_y_coords(first(data))
 end
 
+@testset "Test JSON serialization of MarketBidCost with whole-valued float costs" begin
+    sys = System(100.0)
+    bus = ACBus(nothing)
+    bus.name = "bus1"
+    bus.number = 1
+    bus.bustype = ACBusTypes.REF
+    add_component!(sys, bus)
+    gen = ThermalStandard(nothing)
+    gen.bus = bus
+    gen.name = "gen_whole"
+    add_component!(sys, gen)
+    initial_time = Dates.DateTime("2020-01-01T00:00:00")
+    dates = collect(initial_time:Dates.Hour(1):Dates.DateTime("2020-01-01T23:00:00"))
+    data = PiecewiseStepData.(
+        [[i, i + 1, i + 2] for i in 1.0:24.0],
+        [[i, i + 1] for i in 1.0:24.0],
+    )
+    # Whole-valued floats are read back from JSON as Int64.
+    market_bid = MarketBidCost(0.0, 0.0, 0.0)
+    set_operation_cost!(gen, market_bid)
+    power_units = UnitSystem.NATURAL_UNITS
+    ta = TimeSeries.TimeArray(dates, data)
+    set_incremental_variable_cost!(
+        sys,
+        gen,
+        IS.SingleTimeSeries(; name = "variable_cost", data = ta),
+        power_units,
+    )
+    sys2, result = validate_serialization(sys)
+    @test result
+    gen2 = get_component(ThermalStandard, sys2, "gen_whole")
+    cost2 = get_operation_cost(gen2)
+    @test cost2 isa MarketBidCost
+    @test get_no_load_cost(cost2) === 0.0
+    @test get_shut_down(cost2) === 0.0
+    @test get_start_up(cost2) == get_start_up(market_bid)
+end
+
 @testset "Test JSON serialization of ReserveDemandCurve" begin
     sys = System(100.0)
     devices = []
